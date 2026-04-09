@@ -172,7 +172,7 @@ if __name__ == "__main__":
         "num_frames": 4,
         "loading": "lax"
         },
-        data_dir="/projectnb/cs585/students/sanjiv/CharadesEgo_v1_480/CharadesEgo_v1_480",
+        data_dir="/projectnb/cs585/students/sanjiv/CharadesEgo_v1_480",
         meta_dir="/projectnb/cs585/students/sanjiv/CharadesEgo",
         tsfms=init_video_transform_dict()['test'],
         reader='cv2_charades',
