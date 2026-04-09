@@ -113,7 +113,8 @@ class Multi_Trainer_dist_Charades(Multi_BaseTrainer_dist):
                                                   truncation=True)
                 data['text'] = {key: val.to(self.device) for key, val in data['text'].items()}
                 data['video'] = data['video'].to(self.device)
-
+                print(data['video'].shape)
+                
                 self.optimizer.zero_grad()
                 with torch.set_grad_enabled(True):
                     text_embeds, video_embeds = self.model(data)
