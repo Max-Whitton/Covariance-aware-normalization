@@ -26,8 +26,8 @@
                     "type": "MultiDistTextVideoDataLoader",
                     "args":{
                         "dataset_name": "CharadesEgo",
-                        "data_dir": "dataset/charades/CharadesEgo_v1_480",
-                        "meta_dir": "dataset/charades/CharadesEgo",
+                        "data_dir": "/projectnb/cs585/students/sanjiv/CharadesEgo_v1_480/CharadesEgo_v1_480",
+                        "meta_dir": "/projectnb/cs585/students/sanjiv/CharadesEgo",
                         "reader": "cv2_charades",
                         "shuffle": true,
                         "num_workers": 16,
