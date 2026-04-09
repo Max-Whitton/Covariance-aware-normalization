@@ -124,6 +124,10 @@ def run():
             else:
                 data['video'] = data['video'].to(device)
 
+            #TODO do some transformation here
+
+            data['video'] = transformation(data) 
+
             try:    # for temporal
                 _, vid_embed, _ = model(data, return_embeds=True)
             except:

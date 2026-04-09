@@ -114,6 +114,8 @@ def run():
             else:
                 data['video'] = data['video'].to(device)
 
+            #TODO do some transformation here
+
             text_embed, vid_embed = model(data, return_embeds=True)
             vid_embed_arr.append(vid_embed.cpu().detach())
             text_embed_arr.append(text_embed.cpu().detach())
