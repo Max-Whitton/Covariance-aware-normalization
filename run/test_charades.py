@@ -95,7 +95,7 @@ def run():
 
     # construct set of sentences.
     cls_arr = []
-    with open('dataset/charades/CharadesEgo/Charades_v1_classes.txt', 'r') as charades:
+    with open('/projectnb/cs585/students/sanjiv/CharadesEgo/Charades_v1_classes.txt', 'r') as charades:
         csv_reader = list(reader(charades))
     for line in csv_reader:
         cls_arr.append(line[0][5:])
