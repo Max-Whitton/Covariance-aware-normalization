@@ -17,7 +17,7 @@
                 "input": "text"
             },
             "projection": "minimal",
-            "load_checkpoint": "pretrained/charades_ft.pth"
+            "load_checkpoint": "/projectnb/cs585/students/maxwh/project/egovlp_epo1.pth"
         }
     },
     "data_loader":
