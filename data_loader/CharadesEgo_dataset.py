@@ -16,9 +16,9 @@ from torchvision import transforms
 class CharadesEgo(TextVideoDataset):
     def _load_metadata(self):
         split_files = {
-            'train': 'metadata_train.csv',
-            'val': 'CharadesEgo_v1_test_only1st.csv',
-            'test': 'CharadesEgo_v1_test_only1st.csv'
+            'train': '/projectnb/cs585/students/sanjiv/CharadesEgo/CharadesEgo_v1_train.csv',
+            'val': '/projectnb/cs585/students/sanjiv/CharadesEgo/CharadesEgo_v1_test_only1st.csv',
+            'test': '/projectnb/cs585/students/sanjiv/CharadesEgo/CharadesEgo_v1_test_only1st.csv'
         }
         target_split_fp = split_files[self.split]
         if self.split == 'train':
