@@ -21,9 +21,13 @@ class CharadesEgo(TextVideoDataset):
             'test': 'CharadesEgo_v1_test_only1st.csv'
         }
         target_split_fp = split_files[self.split]
+        self.meta_dir = "/projectnb/cs585/students/sanjiv/CharadesEgo"
         if self.split == 'train':
             metadata = pd.read_csv(os.path.join(self.meta_dir, target_split_fp), delimiter='\t')
         else:
+            print("\n\n\n")
+            print(self.meta_dir)
+            print("\n\n\n")
             metadata = pd.read_csv(os.path.join(self.meta_dir, target_split_fp))
         if self.subsample < 1:
             metadata = metadata.sample(frac=self.subsample)
@@ -49,6 +53,7 @@ class CharadesEgo(TextVideoDataset):
         return labels
 
     def _get_video_path(self, sample):
+     
         rel_video_fp = sample['id'] + '.mp4'
         full_video_fp = os.path.join(self.data_dir, rel_video_fp)
 
@@ -72,6 +77,7 @@ class CharadesEgo(TextVideoDataset):
     def _get_train(self, item):
         item = item % len(self.metadata)
         sample = self.metadata.iloc[item]
+        print(item)
         video_fp, rel_fp = self._get_video_path(sample)
         caption = self._get_caption(sample)
 
@@ -81,9 +87,11 @@ class CharadesEgo(TextVideoDataset):
         frame_sample = 'rand'
         if self.split in ['test', 'val']:
             frame_sample = 'uniform'
-
+        data_dir = '/projectnb/cs585/students/sanjiv/CharadesEgo_v1_480'
+        video_fp = os.path.join(data_dir, rel_fp)
         try:
             if os.path.isfile(video_fp):
+                print("found one!!!")
                 imgs, idxs = self.video_reader(video_path=video_fp, num_frames=self.video_params['num_frames'], sample=frame_sample,
                                                start_sec=start_sec, end_sec=end_sec)
             else:
@@ -129,7 +137,8 @@ class CharadesEgo(TextVideoDataset):
         frame_sample = 'rand'
         if self.split in ['val', 'test']:
             frame_sample = 'uniform'
-
+        data_dir = '/projectnb/cs585/students/sanjiv/CharadesEgo_v1_480'
+        video_fp = os.path.join(data_dir, rel_fp)
         try:
             if os.path.isfile(video_fp):
                 # only supported for read_frames_decord_online
@@ -172,7 +181,7 @@ if __name__ == "__main__":
         "num_frames": 4,
         "loading": "lax"
         },
-        data_dir="/projectnb/cs585/students/sanjiv/CharadesEgo_v1_480/CharadesEgo_v1_480",
+        data_dir="/projectnb/cs585/students/sanjiv/CharadesEgo_v1_480",
         meta_dir="/projectnb/cs585/students/sanjiv/CharadesEgo",
         tsfms=init_video_transform_dict()['test'],
         reader='cv2_charades',

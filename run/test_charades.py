@@ -145,8 +145,9 @@ if __name__ == '__main__':
     args = argparse.ArgumentParser(description='PyTorch Template')
 
     args.add_argument('-r', '--resume',
-                      default = 'results/EgoClip_Charades_egonce_16f/models/0513_00/checkpoint-epoch1.pth',
+                    #   default = 'results/EgoClip_Charades_egonce_16f/models/0513_00/checkpoint-epoch1.pth',
                       # default='results_egoclip/EgoClip_M_EgoNCE_N_V_Neg_Seg_60/models/0509_00/checkpoint-epoch1.pth',
+                      default='/projectnb/cs585/students/maxwh/project/egovlp_epo1.pth',
                       help='path to latest checkpoint (default: None)')
     args.add_argument('-gpu', '--gpu', default=0, type=str,
                       help='indices of GPUs to enable (default: all)')
