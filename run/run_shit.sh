@@ -1,0 +1,2 @@
+# conda activate /projectnb/ivc-ml/maxwh/.conda/envs/egovlpnew
+python /projectnb/cs585/students/dcliu3/proj/Covariance-aware-normalization/run/transformations.py --img_dir /projectnb/cs585/projects/preprocess/data/ego4d/frames/val

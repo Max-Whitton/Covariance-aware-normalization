@@ -27,7 +27,7 @@ def init_transform_dict(input_res=224,
             transforms.CenterCrop(center_crop),
             transforms.Resize(input_res),
             normalize,
-        ])
+        ]),
     }
     return tsfm_dict
 

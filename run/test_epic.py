@@ -15,6 +15,7 @@ import model.metric as module_metric
 import data_loader.data_loader as module_data
 from utils import state_dict_data_parallel_fix
 from parse_config import ConfigParser
+from run.transformations import apply_to_imagenet_normalized_video
 
 ex = Experiment('test')
 
@@ -98,6 +99,15 @@ def run():
     model = model.to(device)
     model.eval()
 
+    # Load Ego4D target stats if a covariance-aware transform is requested
+    mu_target = cov_target = None
+    if args.transform != 'none':
+        if not args.target_stats:
+            raise ValueError("--target_stats is required when --transform is not 'none'")
+        stats = torch.load(args.target_stats, map_location=device)
+        mu_target = stats['mu'].to(device)
+        cov_target = stats['cov'].to(device)
+
     meta_arr = []
     text_embed_arr = []
     vid_embed_arr = []
@@ -113,6 +123,16 @@ def run():
                 data['video'] = [x.to(device) for x in data['video']]
             else:
                 data['video'] = data['video'].to(device)
+
+            if args.transform != 'none':
+                if isinstance(data['video'], list):
+                    data['video'] = [
+                        apply_to_imagenet_normalized_video(v, mu_target, cov_target, method=args.transform)
+                        for v in data['video']
+                    ]
+                else:
+                    data['video'] = apply_to_imagenet_normalized_video(
+                        data['video'], mu_target, cov_target, method=args.transform)
 
             text_embed, vid_embed = model(data, return_embeds=True)
             vid_embed_arr.append(vid_embed.cpu().detach())
@@ -180,6 +200,13 @@ if __name__ == '__main__':
                       help='size of batch')
     args.add_argument('--dual_softmax', default=True, type=bool,
                       help='whether adopt dual-softmax for inference')
+    args.add_argument('--transform', default='none',
+                      choices=['none', 'neighborhood', 'time', 'neighborhood_time'],
+                      help='covariance-aware normalization to apply before the model')
+    args.add_argument('--target_stats', default=None, type=str,
+                      help="path to a torch .pt file containing {'mu': (3,), 'cov': (3,3)} "
+                           "for the Ego4D target distribution "
+                           "(produced by `python -m run.transformations --img_dir ... --out stats.pt`)")
 
     config = ConfigParser(args, test=True, eval_mode='epic')
 
