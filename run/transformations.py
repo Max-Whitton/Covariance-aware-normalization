@@ -2,6 +2,7 @@ import os
 import argparse
 import torch
 from PIL import Image
+import tqdm
 
 # Optional speedups
 try:
@@ -19,6 +20,30 @@ except Exception:
 
 # Device configuration
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def get_distribution(img_dir: str):
+    import os
+    import numpy as np
+    from PIL import Image
+    
+    channel_pixels = [[], [], []]  # R, G, B
+    
+    for fname in tqdm.tqdm(os.listdir(img_dir)):
+        try:
+            if fname.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp')):
+                img = Image.open(os.path.join(img_dir, fname)).convert('RGB')
+                arr = np.array(img) / 255.0  # shape: (H, W, 3)
+                for c in range(3):
+                    channel_pixels[c].append(arr[:, :, c].flatten())
+        except Exception as e:
+            print(f"Error processing {fname}: {e}")
+    
+    result = []
+    for c in range(3):
+        all_vals = np.concatenate(channel_pixels[c])
+        result.append((float(np.mean(all_vals)), float(np.std(all_vals))))
+    
+    return tuple(result)
 
 
 # -----------------------------
@@ -58,7 +83,7 @@ def box_mean(img: torch.Tensor, k: int) -> torch.Tensor:
 # -----------------------------
 # Global target stats μ, Σ
 # -----------------------------
-def global_mean_cov(img255: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def global_mean_cov(img255: torch.Tensor):
     """
     img255: H,W,3 float32 in [0,255]
     returns:
@@ -72,7 +97,7 @@ def global_mean_cov(img255: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return mu, cov
 
 
-def mat_sqrt_and_invsqrt_3x3(M: torch.Tensor, eps: float = 1e-8) -> tuple[torch.Tensor, torch.Tensor]:
+def mat_sqrt_and_invsqrt_3x3(M: torch.Tensor, eps: float = 1e-8):
     """
     M: (...,3,3) symmetric PSD
     returns:
@@ -105,7 +130,7 @@ def local_cov_align(
     eps: float = 1e-3,
     shrink_lambda: float = 0.10,
     chunk_rows: int = 128,
-) -> torch.Tensor:
+):
     """
     img255: H,W,3 float32 in [0,255]
     mu_target: (3,)
@@ -318,3 +343,12 @@ def neighborhood_time_normalization(
     # m = torch.tensor(norm_mean).to(device).view(1, 3, 1, 1, 1)
     # s = torch.tensor(norm_std).to(device).view(1, 3, 1, 1, 1)
     # out_video = (out_video - m) / s
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Test transformations")
+    parser.add_argument("--img_dir", type=str, required=True, help="Directory of images to compute stats from")
+    args = parser.parse_args()
+
+    mu_target, cov_target = get_distribution(args.img_dir)
+    print("Target Mean:", mu_target)
+    print("Target Covariance:\n", cov_target)
