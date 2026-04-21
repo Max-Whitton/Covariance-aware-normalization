@@ -28,7 +28,6 @@ def init_transform_dict(input_res=224,
             transforms.Resize(input_res),
             normalize,
         ]),
-        'neighborhood' : neighborhood_normalization,
     }
     return tsfm_dict
 

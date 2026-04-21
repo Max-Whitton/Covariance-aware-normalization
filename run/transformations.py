@@ -21,29 +21,66 @@ except Exception:
 # Device configuration
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def get_distribution(img_dir: str):
-    import os
+def get_distribution(img_dir: str, apply_egovlp_preprocess: bool = True):
+    """
+    Compute the in-domain target distribution over all images in img_dir, as
+    specified in paper Section 3 / 4.1:
+
+        mu_Ego4D    in R^3        (per-channel mean)
+        Sigma_Ego4D in R^{3x3}    (full RGB covariance, incl. cross-channel terms)
+
+    Stats are accumulated in streaming form to avoid materializing every pixel.
+    Pixels are kept in [0, 255] to match the scale used by local_cov_align /
+    neighborhood_normalization.
+
+    Returns:
+        mu:  torch.Tensor, shape (3,)
+        cov: torch.Tensor, shape (3, 3)
+    """
     import numpy as np
-    from PIL import Image
-    
-    channel_pixels = [[], [], []]  # R, G, B
-    
+
+    n = 0
+    sum_x = np.zeros(3, dtype=np.float64)
+    sum_xx = np.zeros((3, 3), dtype=np.float64)
+
     for fname in tqdm.tqdm(os.listdir(img_dir)):
+        if not fname.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp')):
+            continue
         try:
-            if fname.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.tiff', '.webp')):
-                img = Image.open(os.path.join(img_dir, fname)).convert('RGB')
-                arr = np.array(img) / 255.0  # shape: (H, W, 3)
-                for c in range(3):
-                    channel_pixels[c].append(arr[:, :, c].flatten())
+            img = Image.open(os.path.join(img_dir, fname)).convert('RGB')
+
+            # Paper Sec 3: stats are computed after EgoVLP preprocessing
+            # (resize short side -> 256, center crop -> 256, resize -> 224),
+            # but BEFORE the per-channel ImageNet-style normalization, so that
+            # mu/Sigma live in raw [0, 255] pixel space.
+            if apply_egovlp_preprocess:
+                w, h = img.size
+                short = min(w, h)
+                new_w = int(round(w * 256 / short))
+                new_h = int(round(h * 256 / short))
+                img = img.resize((new_w, new_h), Image.BILINEAR)
+                left = (new_w - 256) // 2
+                top = (new_h - 256) // 2
+                img = img.crop((left, top, left + 256, top + 256))
+                img = img.resize((224, 224), Image.BILINEAR)
+
+            x = np.asarray(img, dtype=np.float64).reshape(-1, 3)  # N,3 in [0,255]
+            n += x.shape[0]
+            sum_x += x.sum(axis=0)
+            sum_xx += x.T @ x
         except Exception as e:
             print(f"Error processing {fname}: {e}")
-    
-    result = []
-    for c in range(3):
-        all_vals = np.concatenate(channel_pixels[c])
-        result.append((float(np.mean(all_vals)), float(np.std(all_vals))))
-    
-    return tuple(result)
+
+    if n == 0:
+        raise RuntimeError(f"No valid images found in {img_dir}")
+
+    mu_np = sum_x / n
+    cov_np = sum_xx / n - np.outer(mu_np, mu_np)
+    cov_np = 0.5 * (cov_np + cov_np.T)  # symmetrize against numerical drift
+
+    mu = torch.from_numpy(mu_np).float()
+    cov = torch.from_numpy(cov_np).float()
+    return mu, cov
 
 
 # -----------------------------
@@ -144,6 +181,10 @@ def local_cov_align(
         raise ValueError("k should be odd (e.g., 7, 9, 11).")
 
     H, W, _ = img255.shape
+    device = img255.device
+    # Ensure target stats live on the same device as the frame
+    mu_target = mu_target.to(device=device, dtype=torch.float32)
+    cov_target = cov_target.to(device=device, dtype=torch.float32)
 
     # Precompute sqrt of target covariance once
     sqrt_cov_t, _ = mat_sqrt_and_invsqrt_3x3(cov_target.unsqueeze(0).unsqueeze(0), eps=1e-8)
@@ -168,7 +209,7 @@ def local_cov_align(
         mu_c = mu_loc[r0:r1, :, :]  # h,W,3
 
         # E[xx^T]
-        Exx = torch.empty((r1 - r0, W, 3, 3), dtype=torch.float32, device=DEVICE)
+        Exx = torch.empty((r1 - r0, W, 3, 3), dtype=torch.float32, device=device)
         Exx[..., 0, 0] = mRR[r0:r1, :]
         Exx[..., 1, 1] = mGG[r0:r1, :]
         Exx[..., 2, 2] = mBB[r0:r1, :]
@@ -186,7 +227,7 @@ def local_cov_align(
             cov_loc = (1.0 - shrink_lambda) * cov_loc + shrink_lambda * diag
 
         # Add eps I
-        I = torch.eye(3, device=DEVICE)
+        I = torch.eye(3, device=device)
         cov_loc = cov_loc + eps * I
 
         # Invsqrt local cov
@@ -234,55 +275,52 @@ def time_normalization(
     video_tensor: torch.Tensor,
     mu_target: torch.Tensor,
     cov_target: torch.Tensor,
-    neighborhood_size: int = 9,
-    time_mean: torch.Tensor = torch.tensor([0.5, 0.5, 0.5]),
-    time_std: torch.Tensor = torch.tensor([0.2, 0.2, 0.2]),
+    neighborhood_size: int = 9,   # unused in the temporal-only ablation
     context_length: int = 5,
-    norm_mean=(0.485, 0.456, 0.406),
-    norm_std=(0.229, 0.224, 0.225)
+    eps: float = 1e-8,
     ):
     """
+    Temporal-only ablation of paper Section 4.2/4.3: for each pixel p we compute
+    per-channel temporal mean/std over a CENTERED window of radius
+    tau = context_length // 2 (so |T_tau(t)| = 2*tau + 1), then apply the
+    first-order version of eq (3):
+
+        y(p, t) = (x(p, t) - mu_in(p, t)) / sigma_in(p, t) * sigma_target + mu_target
+
+    mu_target is the paper's mu_Ego4D (shape (3,)); sigma_target is derived from
+    the diagonal of cov_target (i.e. the per-channel Ego4D std). This ablation
+    does not use cross-channel covariance -- that's what full
+    neighborhood_normalization / neighborhood_time_normalization is for.
+
     video_tensor: (B, C, T, H, W)
     """
     device = video_tensor.device
-    # Ensure time stats are on the correct device and shaped for broadcasting
-    time_mean = time_mean.to(device).view(1, 1, 1, 1, 3)
-    time_std = time_std.to(device).view(1, 1, 1, 1, 3)
 
-    # 2. Permute to (B, T, H, W, C) for channel-last operations
-    video_tensor = video_tensor.permute(0, 2, 3, 4, 1)
-    B, T, H, W, C = video_tensor.shape
+    mu_target_v = mu_target.to(device=device, dtype=video_tensor.dtype).view(1, 1, 1, 1, 3)
+    sigma_target = torch.sqrt(
+        torch.clamp(torch.diagonal(cov_target), min=0.0)
+    ).to(device=device, dtype=video_tensor.dtype).view(1, 1, 1, 1, 3)
 
-    # Create a copy to store results so we don't use normalized frames 
-    # to calculate the mean of subsequent frames (sliding window)
-    out_video = video_tensor.clone()
+    # (B, C, T, H, W) -> (B, T, H, W, C) for channel-last ops
+    x = video_tensor.permute(0, 2, 3, 4, 1).contiguous()
+    B, T, H, W, C = x.shape
 
-    # 3. Context Length Normalization Loop
-    # We iterate up to T - context_length to ensure the window stays in bounds
-    for t in range(T - context_length):
-        # Slice the window: (B, context_length, H, W, C)
-        context_frames = video_tensor[:, t : t + context_length]
-        
-        # Calculate stats across the 'temporal' dimension (dim=1)
-        context_mean = context_frames.mean(dim=1, keepdim=True) # (B, 1, H, W, C)
-        context_std = context_frames.std(dim=1, keepdim=True)   # (B, 1, H, W, C)
+    tau = max(context_length // 2, 1)
+    out = torch.empty_like(x)
 
-        # Apply the transformation to the current frame 't'
-        # Formula: Normalized = (Current - (Target_Mean - Context_Mean)) / Context_Std * Target_Std
-        # Note: We use out_video to avoid in-place corruption during the loop
-        diff = time_mean - context_mean
-        out_video[:, t] = (video_tensor[:, t].unsqueeze(1) - diff) / (context_std + 1e-8) * time_std
+    # Centered window T_tau(t) = [max(0, t-tau), min(T, t+tau+1)]; we clip at
+    # the video boundaries rather than leave frames unnormalized as the
+    # original code did.
+    for t in range(T):
+        t0 = max(0, t - tau)
+        t1 = min(T, t + tau + 1)
+        ctx = x[:, t0:t1]                          # (B, w, H, W, C)
+        ctx_mean = ctx.mean(dim=1)                 # (B, H, W, C)
+        ctx_std = ctx.std(dim=1, unbiased=False)   # (B, H, W, C)
+        out[:, t] = (x[:, t] - ctx_mean) / (ctx_std + eps) * sigma_target.squeeze(1) + mu_target_v.squeeze(1)
 
-    # 4. Final Standard Normalization (ImageNet stats)
-    # Permute back to (B, C, T, H, W) to apply channel-wise normalization
-    out_video = out_video.permute(0, 4, 1, 2, 3)
-    
-    # Standard normalization: (x - mean) / std
-    m = torch.tensor(norm_mean).to(device).view(1, 3, 1, 1, 1)
-    s = torch.tensor(norm_std).to(device).view(1, 3, 1, 1, 1)
-    out_video = (out_video - m) / s
-
-    return out_video
+    # Permute back to (B, C, T, H, W)
+    return out.permute(0, 4, 1, 2, 3)
 
 
 def neighborhood_time_normalization(
@@ -290,65 +328,86 @@ def neighborhood_time_normalization(
     mu_target: torch.Tensor,
     cov_target: torch.Tensor,
     neighborhood_size: int = 9,
-    time_mean: torch.Tensor = torch.tensor([0.5, 0.5, 0.5]),
-    time_std: torch.Tensor = torch.tensor([0.2, 0.2, 0.2]),
     context_length: int = 5,
-    norm_mean=(0.485, 0.456, 0.406),
-    norm_std=(0.229, 0.224, 0.225)
     ):
     """
-    video_tensor: (B, C, T, H, W)
+    Joint spatio-temporal neighborhood normalization (paper eq 1-3).
+
+    This is the full method: the paper defines mu_in(p, t) and Sigma_in(p, t)
+    over the product window N_k(p) x T_tau(t). We approximate it in two passes:
+      1) spatial k x k cross-channel whitening/recoloring (neighborhood_normalization)
+      2) per-pixel temporal rematching over a centered window of length context_length.
+    Both passes use the same (mu_target, cov_target) so the output lives in the
+    target's Ego4D-aligned distribution.
     """
     video_tensor = neighborhood_normalization(video_tensor, mu_target, cov_target, neighborhood_size)
-    video_tensor = time_normalization(video_tensor, mu_target, cov_target, neighborhood_size, time_mean, time_std, context_length, norm_mean, norm_std)
+    video_tensor = time_normalization(video_tensor, mu_target, cov_target, neighborhood_size, context_length)
     return video_tensor
-    # device = video_tensor.device
-    # # Ensure time stats are on the correct device and shaped for broadcasting
-    # time_mean = time_mean.to(device).view(1, 1, 1, 1, 3)
-    # time_std = time_std.to(device).view(1, 1, 1, 1, 3)
 
-    # # 1. Spatial Neighborhood Normalization (Assuming this function exists)
-    # # Expected output: (B, C, T, H, W)
-    # video_tensor = neighborhood_normalization(video_tensor, mu_target, cov_target, neighborhood_size)
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 
-    # # 2. Permute to (B, T, H, W, C) for channel-last operations
-    # video_tensor = video_tensor.permute(0, 2, 3, 4, 1)
-    # B, T, H, W, C = video_tensor.shape
 
-    # # Create a copy to store results so we don't use normalized frames 
-    # # to calculate the mean of subsequent frames (sliding window)
-    # out_video = video_tensor.clone()
+def apply_to_imagenet_normalized_video(
+    video_tensor: torch.Tensor,
+    mu_target: torch.Tensor,
+    cov_target: torch.Tensor,
+    method: str = "neighborhood",
+    imagenet_mean=IMAGENET_MEAN,
+    imagenet_std=IMAGENET_STD,
+    **kwargs,
+) -> torch.Tensor:
+    """
+    Wrapper for applying the paper's normalization to an already-ImageNet-
+    normalized video tensor coming out of the EgoVLP test transform pipeline.
 
-    # # 3. Context Length Normalization Loop
-    # # We iterate up to T - context_length to ensure the window stays in bounds
-    # for t in range(T - context_length):
-    #     # Slice the window: (B, context_length, H, W, C)
-    #     context_frames = video_tensor[:, t : t + context_length]
-        
-    #     # Calculate stats across the 'temporal' dimension (dim=1)
-    #     context_mean = context_frames.mean(dim=1, keepdim=True) # (B, 1, H, W, C)
-    #     context_std = context_frames.std(dim=1, keepdim=True)   # (B, 1, H, W, C)
+    The dataset loaders apply ImageNet normalization at the end of their
+    transform chain, but get_distribution / local_cov_align operate in raw
+    [0, 255] pixel space (paper Sec 3: target stats computed on pixel values
+    after EgoVLP resize/crop, BEFORE per-channel normalization). So we:
+        1) invert ImageNet normalization back to [0, 255],
+        2) apply the selected method (neighborhood / time / neighborhood_time),
+        3) re-apply ImageNet normalization so the model sees the same scale it
+           was trained on.
 
-    #     # Apply the transformation to the current frame 't'
-    #     # Formula: Normalized = (Current - (Target_Mean - Context_Mean)) / Context_Std * Target_Std
-    #     # Note: We use out_video to avoid in-place corruption during the loop
-    #     diff = time_mean - context_mean
-    #     out_video[:, t] = (video_tensor[:, t].unsqueeze(1) - diff) / (context_std + 1e-8) * time_std
+    video_tensor: (B, C, T, H, W), ImageNet-normalized.
+    method: one of "neighborhood", "time", "neighborhood_time".
+    kwargs: forwarded to the underlying method (e.g. neighborhood_size,
+            context_length).
+    """
+    device = video_tensor.device
+    dtype = video_tensor.dtype
+    im_mean = torch.tensor(imagenet_mean, device=device, dtype=dtype).view(1, 3, 1, 1, 1)
+    im_std = torch.tensor(imagenet_std, device=device, dtype=dtype).view(1, 3, 1, 1, 1)
 
-    # # 4. Final Standard Normalization (ImageNet stats)
-    # # Permute back to (B, C, T, H, W) to apply channel-wise normalization
-    # out_video = out_video.permute(0, 4, 1, 2, 3)
-    
-    # # Standard normalization: (x - mean) / std
-    # m = torch.tensor(norm_mean).to(device).view(1, 3, 1, 1, 1)
-    # s = torch.tensor(norm_std).to(device).view(1, 3, 1, 1, 1)
-    # out_video = (out_video - m) / s
+    # Invert ImageNet normalization -> [0, 255]
+    pixels = (video_tensor * im_std + im_mean) * 255.0
+
+    methods = {
+        "neighborhood": neighborhood_normalization,
+        "time": time_normalization,
+        "neighborhood_time": neighborhood_time_normalization,
+    }
+    if method not in methods:
+        raise ValueError(f"Unknown method {method!r}. Choose from {list(methods)}.")
+    aligned = methods[method](pixels, mu_target, cov_target, **kwargs)
+
+    # Re-apply ImageNet normalization
+    return (aligned / 255.0 - im_mean) / im_std
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Test transformations")
-    parser.add_argument("--img_dir", type=str, required=True, help="Directory of images to compute stats from")
+    parser = argparse.ArgumentParser(description="Compute Ego4D target stats (mu, Sigma)")
+    parser.add_argument("--img_dir", type=str, required=True,
+                        help="Directory of images to compute stats from")
+    parser.add_argument("--out", type=str, default=None,
+                        help="Optional path to save {'mu', 'cov'} as a torch .pt file")
     args = parser.parse_args()
 
     mu_target, cov_target = get_distribution(args.img_dir)
     print("Target Mean:", mu_target)
     print("Target Covariance:\n", cov_target)
+
+    if args.out is not None:
+        torch.save({"mu": mu_target, "cov": cov_target}, args.out)
+        print(f"Saved stats to {args.out}")
